@@ -1,7 +1,7 @@
 # app.py - Version starter pour Habynex
 import os
 import math
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 
@@ -96,7 +96,7 @@ class SimpleScoringEngine:
             return 30
         try:
             date = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
-            return (datetime.utcnow() - date).total_seconds() / 86400
+            return (datetime.now(timezone.utc) - date).total_seconds() / 86400
         except:
             return 30
 
@@ -107,19 +107,26 @@ supabase_url = os.getenv('SUPABASE_URL')
 supabase_key = os.getenv('SUPABASE_SERVICE_ROLE_KEY')
 
 if not supabase_url or not supabase_key:
-    raise ValueError("Variables d'environnement manquantes")
+    logger.warning("Variables d'environnement Supabase manquantes")
+    supabase = None
+else:
+    supabase: Client = create_client(supabase_url, supabase_key)
 
-supabase: Client = create_client(supabase_url, supabase_key)
 scoring_engine = SimpleScoringEngine()
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({'status': 'ok', 'service': 'habynex-recommendations'})
+    return jsonify({
+        'status': 'ok',
+        'supabase': 'connected' if supabase else 'disconnected'
+    })
 
 @app.route('/recommendations', methods=['POST'])
 def get_recommendations():
+    if not supabase:
+        return jsonify({'error': 'Service indisponible'}), 503
     try:
-        body = request.get_json()
+        body = request.get_json() or {}
         req = RecommendationRequest(**body)
         
         # 1. CONSTRUIRE LA REQUÊTE DE BASE
@@ -172,7 +179,8 @@ def get_recommendations():
         scored.sort(key=lambda x: x['_score'], reverse=True)
         
         # 5. PAGINATION
-        results = scored[:req.limit]
+        limit = min(req.limit, Config.MAX_LIMIT)
+        results = scored[:limit]
         
         return jsonify({
             'recommendations': results,
@@ -185,13 +193,15 @@ def get_recommendations():
         })
         
     except Exception as e:
-        logger.error(f"Error: {e}")
+        logger.exception("Erreur dans /recommendations")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/feedback', methods=['POST'])
 def track_feedback():
+    if not supabase:
+        return jsonify({'error': 'Service indisponible'}), 503
     try:
-        body = request.get_json()
+        body = request.get_json() or {}
         feedback = FeedbackRequest(**body)
         
         # Sauvegarder l'événement pour analyse future
@@ -199,13 +209,13 @@ def track_feedback():
             'user_id': feedback.user_id,
             'property_id': feedback.property_id,
             'event_type': feedback.event_type,
-            'created_at': datetime.utcnow().isoformat()
+            'created_at': datetime.now(timezone.utc).isoformat()
         }).execute()
         
         return jsonify({'success': True})
         
     except Exception as e:
-        logger.error(f"Feedback error: {e}")
+        logger.exception("Feedback error")
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
