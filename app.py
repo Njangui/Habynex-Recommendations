@@ -1,4 +1,4 @@
-# app.py - Version starter pour Habynex
+# app.py - Version starter pour Habynex avec filtrage par quartier
 import os
 import math
 from datetime import datetime, timezone
@@ -30,6 +30,7 @@ class RecommendationRequest(BaseModel):
     user_id: Optional[str] = None
     limit: int = Config.DEFAULT_LIMIT
     city: Optional[str] = None
+    neighborhood: Optional[str] = None  # Nouveau filtre quartier
     budget_min: Optional[float] = None
     budget_max: Optional[float] = None
     property_type: Optional[str] = None  # 'apartment', 'house', etc.
@@ -41,13 +42,15 @@ class FeedbackRequest(BaseModel):
 
 # ==================== SCORING SIMPLE ====================
 
-class SimpleScoringEngine:
-    """Scoring basique : 3 critères principaux"""
+# ==================== SCORING OPTIMISÉ ====================
+
+class OptimizedScoringEngine:
+    """Scoring amélioré : ville + quartier + type + budget + nouveautés + popularité"""
     
     def score_property(self, property: Dict, user_prefs: Dict) -> Dict:
         score = 0
         reasons = []
-        
+
         # 1. Budget (40 points max)
         if user_prefs.get('budget_min') and user_prefs.get('budget_max'):
             price = property.get('price', 0)
@@ -55,21 +58,28 @@ class SimpleScoringEngine:
                 score += 40
                 reasons.append("budget_match")
             elif price < user_prefs['budget_min']:
-                score += 20  # Bonne affaire
-                reasons.append("good_deal")
-        
-        # 2. Localisation (30 points max)
-        if user_prefs.get('city'):
-            if property.get('city', '').lower() == user_prefs['city'].lower():
-                score += 30
-                reasons.append("city_match")
-        
-        # 3. Type de propriété (20 points max)
-        if user_prefs.get('property_type'):
-            if property.get('property_type') == user_prefs['property_type']:
                 score += 20
-                reasons.append("type_match")
-        
+                reasons.append("good_deal")
+
+        # 2. Ville + Quartier combinés (40 points max)
+        city_match = user_prefs.get('city') and property.get('city', '').lower() == user_prefs['city'].lower()
+        neighborhood_match = user_prefs.get('neighborhood') and property.get('neighborhood', '').lower() == user_prefs['neighborhood'].lower()
+
+        if city_match and neighborhood_match:
+            score += 40
+            reasons.append("city+neighborhood_match")
+        elif city_match:
+            score += 25
+            reasons.append("city_match")
+        elif neighborhood_match:
+            score += 25
+            reasons.append("neighborhood_match")
+
+        # 3. Type de propriété (20 points max)
+        if user_prefs.get('property_type') and property.get('property_type') == user_prefs['property_type']:
+            score += 20
+            reasons.append("type_match")
+
         # 4. Boost nouveauté (10 points max)
         days_since_created = self._days_since(property.get('created_at'))
         if days_since_created < 3:
@@ -78,18 +88,17 @@ class SimpleScoringEngine:
         elif days_since_created < 7:
             score += 5
             reasons.append("recent")
-        
+
         # 5. Popularité (bonus)
-        view_count = property.get('view_count', 0)
-        if view_count > 50:
+        if property.get('view_count', 0) > 50:
             score += 5
             reasons.append("trending")
-        
+
         return {
             'score': score,
             'reasons': reasons[:3]  # Top 3 raisons
         }
-    
+
     @staticmethod
     def _days_since(date_str: Optional[str]) -> float:
         if not date_str:
@@ -138,6 +147,8 @@ def get_recommendations():
         # 2. FILTRES DE BASE
         if req.city:
             query = query.ilike('city', f'%{req.city}%')
+        if req.neighborhood:
+            query = query.ilike('neighborhood', f'%{req.neighborhood}%')  # Nouveau filtre quartier
         
         if req.budget_min:
             query = query.gte('price', req.budget_min * 0.8)
@@ -161,6 +172,7 @@ def get_recommendations():
         # 4. SCORER ET TRIER
         user_prefs = {
             'city': req.city,
+            'neighborhood': req.neighborhood,
             'budget_min': req.budget_min,
             'budget_max': req.budget_max,
             'property_type': req.property_type
@@ -187,6 +199,7 @@ def get_recommendations():
             'total': len(scored),
             'filters_applied': {
                 'city': req.city,
+                'neighborhood': req.neighborhood,
                 'budget_range': [req.budget_min, req.budget_max] if req.budget_min or req.budget_max else None,
                 'property_type': req.property_type
             }
