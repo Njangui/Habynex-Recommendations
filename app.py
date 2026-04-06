@@ -1,4 +1,4 @@
-# app.py - Version corrigée
+# app.py - Version corrigée et fonctionnelle
 import os
 import math
 import json
@@ -94,9 +94,10 @@ class ProfileService:
             return cached
         
         try:
+            # 🔴 CORRECTION : Utilisation de 'id' au lieu de 'user_id'
             response = self.supabase.table("profiles")\
-                .select("user_id, city, preferred_neighborhoods, budget_min, budget_max, preferred_property_types, preferred_listing_types")\
-                .eq("user_id", user_id)\
+                .select("id, city, preferred_neighborhoods, budget_min, budget_max, preferred_property_types, preferred_listing_types")\
+                .eq("id", user_id)\
                 .maybe_single()\
                 .execute()
             
