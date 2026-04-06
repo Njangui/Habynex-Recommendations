@@ -1,4 +1,4 @@
-# app.py - Version corrigée avec accès direct aux profils et cache
+# app.py - Version corrigée
 import os
 import math
 import json
@@ -23,12 +23,11 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 
 # ==================== CACHE SIMPLE EN MÉMOIRE ====================
 class SimpleCache:
-    def __init__(self, ttl_seconds: int = 300):  # 5 minutes par défaut
+    def __init__(self, ttl_seconds: int = 300):
         self._cache = {}
         self._ttl = ttl_seconds
     
     def _make_key(self, *args, **kwargs) -> str:
-        """Crée une clé de cache unique"""
         key_data = json.dumps({"args": args, "kwargs": kwargs}, sort_keys=True)
         return hashlib.md5(key_data.encode()).hexdigest()
     
@@ -37,7 +36,7 @@ class SimpleCache:
         if key in self._cache:
             data, timestamp = self._cache[key]
             if time.time() - timestamp < self._ttl:
-                logger.info(f"Cache HIT pour clé: {key[:8]}...")
+                logger.info(f"Cache HIT: {key[:8]}")
                 return data
             else:
                 del self._cache[key]
@@ -46,8 +45,8 @@ class SimpleCache:
     def set(self, value: Any, *args, **kwargs):
         key = self._make_key(*args, **kwargs)
         self._cache[key] = (value, time.time())
-        logger.info(f"Cache SET pour clé: {key[:8]}...")
-    
+        logger.info(f"Cache SET: {key[:8]}")
+
     def invalidate(self, pattern: str = None):
         if pattern:
             keys_to_delete = [k for k in self._cache.keys() if pattern in k]
@@ -56,16 +55,14 @@ class SimpleCache:
         else:
             self._cache.clear()
 
-# Cache global
-recommendations_cache = SimpleCache(ttl_seconds=300)  # 5 min
-profile_cache = SimpleCache(ttl_seconds=60)  # 1 min pour les profils
+recommendations_cache = SimpleCache(ttl_seconds=300)
+profile_cache = SimpleCache(ttl_seconds=60)
 
 # ==================== CONFIGURATION ====================
 class Config:
     DEFAULT_LIMIT = 10
     MAX_LIMIT = 30
     MAX_CANDIDATES = 50
-    CACHE_TTL = 300  # 5 minutes
 
 # ==================== MODÈLES ====================
 class RecommendationRequest(BaseModel):
@@ -76,6 +73,7 @@ class RecommendationRequest(BaseModel):
     budget_min: Optional[float] = None
     budget_max: Optional[float] = None
     property_type: Optional[str] = None
+    listing_type: Optional[str] = None
 
 class FeedbackRequest(BaseModel):
     user_id: str
@@ -84,48 +82,39 @@ class FeedbackRequest(BaseModel):
 
 # ==================== SERVICE PROFIL ====================
 class ProfileService:
-    """Service dédié à la récupération des profils utilisateurs"""
-    
     def __init__(self, supabase_client: Client):
         self.supabase = supabase_client
     
     def get_profile(self, user_id: str) -> Optional[Dict]:
-        """Récupère le profil utilisateur avec cache"""
         if not user_id:
             return None
         
-        # Vérifier le cache
         cached = profile_cache.get("profile", user_id)
         if cached:
             return cached
         
         try:
             response = self.supabase.table("profiles")\
-                .select("id, city, neighborhood, budget_min, budget_max, preferred_property_type, user_type")\
-                .eq("id", user_id)\
+                .select("user_id, city, preferred_neighborhoods, budget_min, budget_max, preferred_property_types, preferred_listing_types")\
+                .eq("user_id", user_id)\
                 .maybe_single()\
                 .execute()
             
             profile = response.data
             if profile:
                 profile_cache.set(profile, "profile", user_id)
-                logger.info(f"Profil récupéré pour {user_id}: {profile.get('city')}")
-            else:
-                logger.warning(f"Aucun profil trouvé pour {user_id}")
-            
+                logger.info(f"Profil récupéré: {profile.get('city')}")
             return profile
             
         except Exception as e:
-            logger.error(f"Erreur récupération profil {user_id}: {e}")
+            logger.error(f"Erreur profil {user_id}: {e}")
             return None
 
 # ==================== SCORING OPTIMISÉ ====================
 class OptimizedScoringEngine:
-    """Scoring amélioré avec pondération dynamique"""
-    
     WEIGHTS = {
         'budget': 35,
-        'location': 35,  # Ville + quartier combinés
+        'location': 35,
         'property_type': 20,
         'recency': 10,
         'popularity': 5
@@ -144,10 +133,10 @@ class OptimizedScoringEngine:
             if budget_min <= price <= budget_max:
                 score += self.WEIGHTS['budget']
                 reasons.append("budget_match")
-            elif price < budget_min * 0.9:  # Bonne affaire
+            elif price < budget_min * 0.9:
                 score += self.WEIGHTS['budget'] * 0.7
                 reasons.append("good_deal")
-            elif price <= budget_max * 1.1:  # Légèrement au-dessus mais acceptable
+            elif price <= budget_max * 1.1:
                 score += self.WEIGHTS['budget'] * 0.4
                 reasons.append("slightly_over_budget")
         
@@ -193,13 +182,13 @@ class OptimizedScoringEngine:
             score += self.WEIGHTS['popularity'] * 0.6
             reasons.append("popular")
         
-        # Bonus si correspondance parfaite
+        # Bonus correspondance parfaite
         if len(reasons) >= 4:
             score += 10
             reasons.append("perfect_match")
         
         return {
-            'score': min(score, 100),  # Plafond à 100
+            'score': min(score, 100),
             'reasons': reasons[:3],
             'is_fallback': is_fallback
         }
@@ -222,34 +211,25 @@ class RecommendationService:
         self.profile_service = ProfileService(supabase_client)
     
     def get_recommendations(self, req: RecommendationRequest) -> Dict:
-        """
-        NOUVELLE LOGIQUE :
-        1. Si user_id fourni → récupérer profil automatiquement
-        2. Fusionner préférences requête + profil (priorité à la requête)
-        3. Cache des résultats par user_id
-        4. Fallback intelligent uniquement si nécessaire
-        """
+        logger.info(f"=== NOUVELLE REQUÊTE ===")
+        logger.info(f"user_id: {req.user_id}")
+        logger.info(f"Reçu: city={req.city}, budget={req.budget_min}-{req.budget_max}, type={req.property_type}")
         
-        # Étape 1: Récupérer le profil si user_id fourni
+        # Récupérer le profil si user_id fourni
         user_profile = None
         if req.user_id:
             user_profile = self.profile_service.get_profile(req.user_id)
             logger.info(f"Profil récupéré: {user_profile is not None}")
         
-        # Étape 2: Fusionner les préférences (requête > profil)
+        # Fusionner les préférences (requête > profil)
         merged_prefs = self._merge_preferences(req, user_profile)
         logger.info(f"Préférences fusionnées: {merged_prefs}")
         
-        # Vérifier si on a des préférences significatives
-        has_preferences = any([
-            merged_prefs.get('city'),
-            merged_prefs.get('neighborhood'),
-            merged_prefs.get('budget_min') is not None,
-            merged_prefs.get('budget_max') is not None,
-            merged_prefs.get('property_type')
-        ])
+        # 🔴 CORRECTION : Vérifier si on a des préférences significatives
+        has_preferences = self._has_significant_preferences(merged_prefs)
+        logger.info(f"has_preferences: {has_preferences}")
         
-        # Clé de cache unique
+        # Clé de cache
         cache_key = (
             req.user_id or 'anonymous',
             merged_prefs.get('city'),
@@ -260,58 +240,73 @@ class RecommendationService:
             req.limit
         )
         
-        # Vérifier le cache
+        # Vérifier cache
         cached_result = recommendations_cache.get(*cache_key)
         if cached_result:
             cached_result['from_cache'] = True
+            logger.info("Retour cache")
             return cached_result
         
-        # CAS 1: Pas de préférences → fallback générique
+        # PAS DE PRÉFÉRENCES → fallback générique
         if not has_preferences:
+            logger.info("🔴 PAS DE PRÉFÉRENCES → Fallback générique")
             result = self._get_generic_recommendations(req.limit)
             recommendations_cache.set(result, *cache_key)
             return result
         
-        # CAS 2: Recherche personnalisée avec critères fusionnés
-        result = self._search_with_preferences(merged_prefs, req.limit)
+        # RECHERCHE PERSONNALISÉE
+        logger.info("🟢 PRÉFÉRENCES TROUVÉES → Recherche personnalisée")
+        results = self._search_with_preferences(merged_prefs, req.limit)
+        logger.info(f"Résultats recherche: {len(results['recommendations'])}")
         
-        # CAS 3: Peu de résultats → fallback similaire
-        if len(result['recommendations']) < 3:
-            logger.info("Peu de résultats, fallback similaire...")
-            fallback_result = self._get_similar_fallback(merged_prefs, req.limit)
-            # Fusionner les résultats
-            combined = result['recommendations'] + fallback_result['recommendations']
-            # Supprimer les doublons
-            seen_ids = set()
-            unique_results = []
-            for r in combined:
-                if r['id'] not in seen_ids:
-                    seen_ids.add(r['id'])
-                    unique_results.append(r)
+        # Si peu de résultats, fallback amélioré
+        if len(results['recommendations']) < 3:
+            logger.info("🟡 PEU DE RÉSULTATS → Fallback amélioré")
+            fallback_results = self._get_similar_fallback(merged_prefs, req.limit)
             
-            result = {
-                'recommendations': unique_results[:req.limit],
-                'total': len(unique_results),
-                'is_fallback': True,
-                'fallback_type': 'enhanced',
-                'message': 'Voici les meilleures correspondances, y compris des suggestions proches.'
-            }
+            # Fusionner sans doublons
+            seen_ids = {r['id'] for r in results['recommendations']}
+            for r in fallback_results['recommendations']:
+                if r['id'] not in seen_ids:
+                    results['recommendations'].append(r)
+                    seen_ids.add(r['id'])
+            
+            results['recommendations'] = results['recommendations'][:req.limit]
+            results['is_fallback'] = True
+            results['fallback_type'] = 'enhanced'
+            results['message'] = 'Voici les meilleures correspondances, y compris des suggestions proches.'
         
-        recommendations_cache.set(result, *cache_key)
-        return result
+        recommendations_cache.set(results, *cache_key)
+        return results
+    
+    def _has_significant_preferences(self, prefs: Dict) -> bool:
+        """🔴 CORRECTION : Détecter si on a des préférences significatives"""
+        has_city = bool(prefs.get('city'))
+        has_neighborhood = bool(prefs.get('neighborhood'))
+        has_budget = prefs.get('budget_min') is not None or prefs.get('budget_max') is not None
+        has_property_type = bool(prefs.get('property_type'))
+        
+        # On considère qu'on a des préférences si on a AU MOINS ville OU budget
+        return has_city or has_budget or has_neighborhood or has_property_type
     
     def _merge_preferences(self, req: RecommendationRequest, profile: Optional[Dict]) -> Dict:
-        """Fusionne les préférences de la requête et du profil"""
         merged = {}
         
+        # Extraire du profil
         if profile:
             merged['city'] = profile.get('city')
-            merged['neighborhood'] = profile.get('neighborhood')
+            # preferred_neighborhoods est un tableau
+            neighborhoods = profile.get('preferred_neighborhoods', [])
+            if neighborhoods and len(neighborhoods) > 0:
+                merged['neighborhood'] = neighborhoods[0]
             merged['budget_min'] = profile.get('budget_min')
             merged['budget_max'] = profile.get('budget_max')
-            merged['property_type'] = profile.get('preferred_property_type')
+            # preferred_property_types est un tableau
+            property_types = profile.get('preferred_property_types', [])
+            if property_types and len(property_types) > 0:
+                merged['property_type'] = property_types[0]
         
-        # La requête écrase le profil si des valeurs sont fournies
+        # Requête écrase le profil
         if req.city is not None:
             merged['city'] = req.city
         if req.neighborhood is not None:
@@ -346,6 +341,8 @@ class RecommendationService:
         
         response = query.order('created_at', desc=True).limit(Config.MAX_CANDIDATES).execute()
         candidates = response.data or []
+        
+        logger.info(f"Candidats trouvés: {len(candidates)}")
         
         if not candidates:
             return {'recommendations': [], 'total': 0, 'is_fallback': False}
@@ -388,12 +385,13 @@ class RecommendationService:
         if prefs.get('budget_max') is not None:
             query = query.lte('price', prefs['budget_max'] * 1.3)
         
-        # Type conservé si possible
         if prefs.get('property_type'):
             query = query.eq('property_type', prefs['property_type'])
         
         response = query.order('created_at', desc=True).limit(Config.MAX_CANDIDATES).execute()
         candidates = response.data or []
+        
+        logger.info(f"Fallback candidats: {len(candidates)}")
         
         if not candidates:
             return self._get_generic_recommendations(limit)
@@ -404,7 +402,7 @@ class RecommendationService:
             scoring = self.scoring.score_property(prop, prefs, is_fallback=True)
             scored.append({
                 **prop,
-                '_score': scoring['score'] * 0.8,  # Pénalité de 20% pour fallback
+                '_score': scoring['score'] * 0.8,  # Pénalité 20%
                 '_reasons': scoring['reasons'],
                 '_is_fallback': True
             })
@@ -421,7 +419,7 @@ class RecommendationService:
     
     def _get_generic_recommendations(self, limit: int) -> Dict:
         """Fallback générique: récentes + populaires"""
-        logger.info("Fallback générique - récentes et populaires")
+        logger.info("Fallback générique")
         
         response = self.supabase.table('properties')\
             .select('*')\
@@ -441,7 +439,6 @@ class RecommendationService:
                 'fallback_type': 'generic'
             }
         
-        # Scoring basé sur nouveauté et popularité
         scored = []
         for prop in candidates:
             score = 0
@@ -503,11 +500,7 @@ def health():
     return jsonify({
         'status': 'ok',
         'supabase': 'connected' if supabase else 'disconnected',
-        'service': 'ready' if recommendation_service else 'unavailable',
-        'cache_stats': {
-            'recommendations': len(recommendations_cache._cache),
-            'profiles': len(profile_cache._cache)
-        }
+        'service': 'ready' if recommendation_service else 'unavailable'
     })
 
 @app.route('/recommendations', methods=['POST'])
@@ -519,7 +512,7 @@ def get_recommendations():
         body = request.get_json() or {}
         req = RecommendationRequest(**body)
         
-        logger.info(f"Requête reçue: user_id={req.user_id}, limit={req.limit}")
+        logger.info(f"Requête reçue: {req.dict()}")
         
         result = recommendation_service.get_recommendations(req)
         
@@ -557,24 +550,12 @@ def track_feedback():
             'created_at': datetime.now(timezone.utc).isoformat()
         }).execute()
         
-        # Invalider le cache pour cet utilisateur
         recommendations_cache.invalidate(feedback.user_id)
         
         return jsonify({'success': True})
         
     except Exception as e:
         logger.exception("Feedback error")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/invalidate-cache', methods=['POST'])
-def invalidate_cache():
-    """Endpoint pour invalider manuellement le cache"""
-    try:
-        pattern = request.json.get('pattern') if request.json else None
-        recommendations_cache.invalidate(pattern)
-        profile_cache.invalidate(pattern)
-        return jsonify({'success': True, 'message': 'Cache invalidé'})
-    except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
