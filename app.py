@@ -1,4 +1,4 @@
-# app.py - Version corrigée et fonctionnelle
+# app.py - Version corrigée et fonctionnelle (alignée avec le frontend)
 import os
 import math
 import json
@@ -94,28 +94,37 @@ class ProfileService:
             return cached
         
         try:
-            # 🔴 CORRECTION : Utilisation de .limit(1) au lieu de .maybe_single()
+            # ✅ CORRECTION : Utiliser 'user_id' comme colonne (aligné avec le frontend)
+            # et les mêmes noms de colonnes que le frontend
             response = self.supabase.table("profiles")\
-                .select("id, city, preferred_neighborhoods, budget_min, budget_max, preferred_property_types, preferred_listing_types")\
-                .eq("id", user_id)\
+                .select("""
+                    user_id,
+                    city, 
+                    preferred_neighborhoods, 
+                    budget_min, 
+                    budget_max, 
+                    preferred_property_types,
+                    preferred_listing_types
+                """)\
+                .eq("user_id", user_id)\
                 .limit(1)\
                 .execute()
             
-            # 🔴 CORRECTION : Gestion correcte de la réponse
+            # ✅ CORRECTION : Gestion robuste de la réponse
             profile = None
             if response and hasattr(response, 'data') and response.data:
                 profile = response.data[0] if len(response.data) > 0 else None
             
             if profile:
                 profile_cache.set(profile, "profile", user_id)
-                logger.info(f"Profil récupéré: {profile.get('city')}")
+                logger.info(f"✅ Profil récupéré: {profile.get('city')} pour user_id={user_id}")
             else:
-                logger.info(f"Profil non trouvé pour id: {user_id}")
+                logger.info(f"❌ Profil non trouvé pour user_id: {user_id}")
             
             return profile
             
         except Exception as e:
-            logger.error(f"Erreur profil {user_id}: {e}")
+            logger.error(f"💥 Erreur récupération profil {user_id}: {e}")
             return None
 
 # ==================== SCORING OPTIMISÉ ====================
@@ -233,7 +242,7 @@ class RecommendationService:
         merged_prefs = self._merge_preferences(req, user_profile)
         logger.info(f"Préférences fusionnées: {merged_prefs}")
         
-        # 🔴 CORRECTION : Vérifier si on a des préférences significatives
+        # Vérifier si on a des préférences significatives
         has_preferences = self._has_significant_preferences(merged_prefs)
         logger.info(f"has_preferences: {has_preferences}")
         
@@ -288,7 +297,7 @@ class RecommendationService:
         return results
     
     def _has_significant_preferences(self, prefs: Dict) -> bool:
-        """🔴 CORRECTION : Détecter si on a des préférences significatives"""
+        """Détecter si on a des préférences significatives"""
         has_city = bool(prefs.get('city'))
         has_neighborhood = bool(prefs.get('neighborhood'))
         has_budget = prefs.get('budget_min') is not None or prefs.get('budget_max') is not None
@@ -300,19 +309,27 @@ class RecommendationService:
     def _merge_preferences(self, req: RecommendationRequest, profile: Optional[Dict]) -> Dict:
         merged = {}
         
-        # Extraire du profil
+        # Extraire du profil (utilise les mêmes noms que le frontend)
         if profile:
             merged['city'] = profile.get('city')
-            # preferred_neighborhoods est un tableau
+            
+            # preferred_neighborhoods est un tableau (comme dans le frontend)
             neighborhoods = profile.get('preferred_neighborhoods', [])
             if neighborhoods and len(neighborhoods) > 0:
                 merged['neighborhood'] = neighborhoods[0]
+            
             merged['budget_min'] = profile.get('budget_min')
             merged['budget_max'] = profile.get('budget_max')
-            # preferred_property_types est un tableau
+            
+            # preferred_property_types est un tableau (comme dans le frontend)
             property_types = profile.get('preferred_property_types', [])
             if property_types and len(property_types) > 0:
                 merged['property_type'] = property_types[0]
+            
+            # preferred_listing_types est un tableau (comme dans le frontend)
+            listing_types = profile.get('preferred_listing_types', [])
+            if listing_types and len(listing_types) > 0:
+                merged['listing_type'] = listing_types[0]
         
         # Requête écrase le profil
         if req.city is not None:
@@ -325,6 +342,8 @@ class RecommendationService:
             merged['budget_max'] = req.budget_max
         if req.property_type is not None:
             merged['property_type'] = req.property_type
+        if req.listing_type is not None:
+            merged['listing_type'] = req.listing_type
         
         return merged
     
@@ -346,6 +365,8 @@ class RecommendationService:
             query = query.lte('price', prefs['budget_max'])
         if prefs.get('property_type'):
             query = query.eq('property_type', prefs['property_type'])
+        if prefs.get('listing_type'):
+            query = query.eq('listing_type', prefs['listing_type'])
         
         response = query.order('created_at', desc=True).limit(Config.MAX_CANDIDATES).execute()
         candidates = response.data or []
