@@ -1,9 +1,10 @@
-# app.py - Version corrigée et fonctionnelle (alignée avec le frontend)
+# app.py - Version corrigée et fonctionnelle (avec normalisation des villes)
 import os
 import math
 import json
 import hashlib
 import time
+import unicodedata
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass
@@ -80,6 +81,19 @@ class FeedbackRequest(BaseModel):
     property_id: str
     event_type: str
 
+# ==================== UTILITAIRES ====================
+def normalize_text(text: Optional[str]) -> str:
+    """Normalise le texte : minuscules, sans accents, sans espaces superflus"""
+    if not text:
+        return ""
+    # Convertit en minuscules
+    text = text.lower()
+    # Supprime les accents
+    text = ''.join(c for c in unicodedata.normalize('NFD', text) if unicodedata.category(c) != 'Mn')
+    # Supprime les espaces superflus
+    text = text.strip()
+    return text
+
 # ==================== SERVICE PROFIL ====================
 class ProfileService:
     def __init__(self, supabase_client: Client):
@@ -94,8 +108,6 @@ class ProfileService:
             return cached
         
         try:
-            # ✅ CORRECTION : Utiliser 'user_id' comme colonne (aligné avec le frontend)
-            # et les mêmes noms de colonnes que le frontend
             response = self.supabase.table("profiles")\
                 .select("""
                     user_id,
@@ -110,7 +122,6 @@ class ProfileService:
                 .limit(1)\
                 .execute()
             
-            # ✅ CORRECTION : Gestion robuste de la réponse
             profile = None
             if response and hasattr(response, 'data') and response.data:
                 profile = response.data[0] if len(response.data) > 0 else None
@@ -157,11 +168,11 @@ class OptimizedScoringEngine:
                 score += self.WEIGHTS['budget'] * 0.4
                 reasons.append("slightly_over_budget")
         
-        # 2. Localisation (35 points max)
-        prop_city = (property.get('city') or '').lower().strip()
-        prop_neighborhood = (property.get('neighborhood') or '').lower().strip()
-        user_city = (user_prefs.get('city') or '').lower().strip()
-        user_neighborhood = (user_prefs.get('neighborhood') or '').lower().strip()
+        # 2. Localisation (35 points max) - UTILISE LA NORMALISATION
+        prop_city = normalize_text(property.get('city'))
+        prop_neighborhood = normalize_text(property.get('neighborhood'))
+        user_city = normalize_text(user_prefs.get('city'))
+        user_neighborhood = normalize_text(user_prefs.get('neighborhood'))
         
         city_match = user_city and prop_city == user_city
         neighborhood_match = user_neighborhood and prop_neighborhood == user_neighborhood
@@ -303,17 +314,15 @@ class RecommendationService:
         has_budget = prefs.get('budget_min') is not None or prefs.get('budget_max') is not None
         has_property_type = bool(prefs.get('property_type'))
         
-        # On considère qu'on a des préférences si on a AU MOINS ville OU budget
         return has_city or has_budget or has_neighborhood or has_property_type
     
     def _merge_preferences(self, req: RecommendationRequest, profile: Optional[Dict]) -> Dict:
         merged = {}
         
-        # Extraire du profil (utilise les mêmes noms que le frontend)
+        # Extraire du profil
         if profile:
             merged['city'] = profile.get('city')
             
-            # preferred_neighborhoods est un tableau (comme dans le frontend)
             neighborhoods = profile.get('preferred_neighborhoods', [])
             if neighborhoods and len(neighborhoods) > 0:
                 merged['neighborhood'] = neighborhoods[0]
@@ -321,12 +330,10 @@ class RecommendationService:
             merged['budget_min'] = profile.get('budget_min')
             merged['budget_max'] = profile.get('budget_max')
             
-            # preferred_property_types est un tableau (comme dans le frontend)
             property_types = profile.get('preferred_property_types', [])
             if property_types and len(property_types) > 0:
                 merged['property_type'] = property_types[0]
             
-            # preferred_listing_types est un tableau (comme dans le frontend)
             listing_types = profile.get('preferred_listing_types', [])
             if listing_types and len(listing_types) > 0:
                 merged['listing_type'] = listing_types[0]
@@ -348,15 +355,20 @@ class RecommendationService:
         return merged
     
     def _search_with_preferences(self, prefs: Dict, limit: int) -> Dict:
-        """Recherche avec critères exacts"""
+        """Recherche avec critères exacts - CORRIGÉ pour la normalisation"""
         query = self.supabase.table('properties')\
             .select('*')\
             .eq('is_published', True)\
             .eq('is_available', True)
         
-        # Filtres flexibles
+        # 🔴 CORRECTION : Recherche par ville avec normalisation
         if prefs.get('city'):
-            query = query.ilike('city', f"%{prefs['city']}%")
+            city_normalized = normalize_text(prefs['city'])
+            # On cherche les villes qui contiennent le terme (sans accent)
+            # Comme on ne peut pas faire ilike sans accent en SQL simple, 
+            # on fait une recherche plus large et on filtre après
+            query = query.ilike('city', f"%{prefs['city'][:3]}%")  # Recherche sur les 3 premiers caractères
+        
         if prefs.get('neighborhood'):
             query = query.ilike('neighborhood', f"%{prefs['neighborhood']}%")
         if prefs.get('budget_min') is not None:
@@ -370,6 +382,14 @@ class RecommendationService:
         
         response = query.order('created_at', desc=True).limit(Config.MAX_CANDIDATES).execute()
         candidates = response.data or []
+        
+        # 🔴 CORRECTION : Filtrage post-requête pour la ville (normalisation)
+        if prefs.get('city'):
+            city_normalized = normalize_text(prefs['city'])
+            candidates = [
+                prop for prop in candidates 
+                if city_normalized in normalize_text(prop.get('city', ''))
+            ]
         
         logger.info(f"Candidats trouvés: {len(candidates)}")
         
@@ -398,15 +418,16 @@ class RecommendationService:
         }
     
     def _get_similar_fallback(self, prefs: Dict, limit: int) -> Dict:
-        """Fallback élargi mais intelligent"""
+        """Fallback élargi mais intelligent - CORRIGÉ"""
         query = self.supabase.table('properties')\
             .select('*')\
             .eq('is_published', True)\
             .eq('is_available', True)
         
-        # Critères élargis
+        # 🔴 CORRECTION : Recherche par ville avec normalisation
         if prefs.get('city'):
-            query = query.ilike('city', f"%{prefs['city']}%")
+            city_normalized = normalize_text(prefs['city'])
+            query = query.ilike('city', f"%{prefs['city'][:3]}%")
         
         # Budget élargi ±30%
         if prefs.get('budget_min') is not None:
@@ -419,6 +440,14 @@ class RecommendationService:
         
         response = query.order('created_at', desc=True).limit(Config.MAX_CANDIDATES).execute()
         candidates = response.data or []
+        
+        # 🔴 CORRECTION : Filtrage post-requête pour la ville
+        if prefs.get('city'):
+            city_normalized = normalize_text(prefs['city'])
+            candidates = [
+                prop for prop in candidates 
+                if city_normalized in normalize_text(prop.get('city', ''))
+            ]
         
         logger.info(f"Fallback candidats: {len(candidates)}")
         
@@ -455,7 +484,7 @@ class RecommendationService:
             .eq('is_published', True)\
             .eq('is_available', True)\
             .order('created_at', desc=True)\
-            .limit(Config.MAX_CANDIDATES)\
+            .limit(Config.MAX_LIMIT)\
             .execute()
         
         candidates = response.data or []
