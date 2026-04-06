@@ -94,17 +94,24 @@ class ProfileService:
             return cached
         
         try:
-            # 🔴 CORRECTION : Utilisation de 'id' au lieu de 'user_id'
+            # 🔴 CORRECTION : Utilisation de .limit(1) au lieu de .maybe_single()
             response = self.supabase.table("profiles")\
                 .select("id, city, preferred_neighborhoods, budget_min, budget_max, preferred_property_types, preferred_listing_types")\
                 .eq("id", user_id)\
-                .maybe_single()\
+                .limit(1)\
                 .execute()
             
-            profile = response.data
+            # 🔴 CORRECTION : Gestion correcte de la réponse
+            profile = None
+            if response and hasattr(response, 'data') and response.data:
+                profile = response.data[0] if len(response.data) > 0 else None
+            
             if profile:
                 profile_cache.set(profile, "profile", user_id)
                 logger.info(f"Profil récupéré: {profile.get('city')}")
+            else:
+                logger.info(f"Profil non trouvé pour id: {user_id}")
+            
             return profile
             
         except Exception as e:
