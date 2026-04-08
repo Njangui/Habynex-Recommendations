@@ -3,42 +3,14 @@ name: Warmup Render API
 on:
   schedule:
     - cron: '*/10 * * * *'  # Toutes les 10 minutes
-  workflow_dispatch:  # Permet de lancer manuellement
+  workflow_dispatch:  # Permet de lancer manuellement aussi
 
 jobs:
   warmup:
     runs-on: ubuntu-latest
     steps:
-      - name: Warmup API - Health Check
+      - name: Call Render Warmup Endpoint
         run: |
-          echo "🔥 Réchauffement de l'API Render..."
-          
-          # Appel à l'endpoint /health (ou /recommendations léger)
-          STATUS_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-            --max-time 10 \
-            -X POST \
-            -H "Content-Type: application/json" \
-            -d '{"user_id": null, "limit": 1}' \
-            https://habynex-recommendations-systeme-v1.onrender.com/recommendations)
-          
-          echo "Status code: $STATUS_CODE"
-          
-          if [ "$STATUS_CODE" = "200" ] || [ "$STATUS_CODE" = "503" ]; then
-            echo "✅ API est chaude !"
-            exit 0
-          else
-            echo "⚠️ Réponse inattendue: $STATUS_CODE"
-            exit 0  # On ne fait pas échouer le job
-          fi
-          
-      - name: Second warmup call (sécurité)
-        run: |
-          sleep 5
-          curl -s -o /dev/null --max-time 10 \
-            -X POST \
-            -H "Content-Type: application/json" \
-            -d '{"user_id": null, "limit": 1}' \
-            https://habynex-recommendations-systeme-v1.onrender.com/recommendations || true
-          
-          echo "🔥 Double réchauffement terminé"
-          
+          curl -s -o /dev/null -w "%{http_code}" \
+          https://habynex-recommendations-systeme-v1.onrender.com/warmup \
+          || echo "Warmup failed"
