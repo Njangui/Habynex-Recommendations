@@ -1,0 +1,16 @@
+name: Warmup Render API
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'  # Toutes les 10 minutes
+  workflow_dispatch:  # Permet de lancer manuellement aussi
+
+jobs:
+  warmup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call Render Warmup Endpoint
+        run: |
+          curl -s -o /dev/null -w "%{http_code}" \
+          https://habynex-recommendations-systeme-v1.onrender.com/warmup \
+          || echo "Warmup failed"
