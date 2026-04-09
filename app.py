@@ -111,7 +111,7 @@ class ProfileService:
         
         try:
             response = self.supabase.table("profiles")\
-                .select("user_id, city, neighborhood, budget_min, budget_max, property_type, listing_type")\
+                .select("user_id, city, preferred_neighborhoods, budget_min, budget_max, preferred_property_types, preferred_listing_type")\
                 .eq("user_id", user_id)\
                 .limit(1)\
                 .execute()
@@ -289,11 +289,22 @@ class RecommendationService:
         # Profil
         if profile:
             merged['city'] = profile.get('city')
-            merged['neighborhood'] = profile.get('neighborhood')
+            
+            # preferred_neighborhoods est un tableau, on prend le premier
+            neighborhoods = profile.get('preferred_neighborhoods', [])
+            if neighborhoods and len(neighborhoods) > 0:
+                merged['neighborhood'] = neighborhoods[0]
+            
             merged['budget_min'] = profile.get('budget_min')
             merged['budget_max'] = profile.get('budget_max')
-            merged['property_type'] = profile.get('property_type')
-            merged['listing_type'] = profile.get('listing_type')
+            
+            # preferred_property_types est un tableau, on prend le premier
+            property_types = profile.get('preferred_property_types', [])
+            if property_types and len(property_types) > 0:
+                merged['property_type'] = property_types[0]
+            
+            # preferred_listing_type (pas un tableau, valeur directe)
+            merged['listing_type'] = profile.get('preferred_listing_type')
         
         # Requête écrase profil
         if req.city: merged['city'] = req.city
@@ -309,7 +320,7 @@ class RecommendationService:
         """Recherche optimisée avec index"""
         try:
             query = self.supabase.table('properties')\
-                .select('id, title, price, city, neighborhood, property_type, listing_type, created_at, view_count, images, bedrooms, bathrooms, surface')\
+                .select('id, title, price, city, neighborhood, property_type, listing_type, created_at, view_count, images, bedrooms, bathrooms')\
                 .eq('is_published', True)\
                 .eq('is_available', True)
             
