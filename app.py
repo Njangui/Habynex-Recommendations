@@ -25,17 +25,17 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 # ==================== CONFIGURATION OPTIMISÉE ====================
 class Config:
     DEFAULT_LIMIT = 10
-    MAX_LIMIT = 20  # Réduit de 30 à 20
-    MAX_CANDIDATES = 20  # Réduit de 50 à 20
-    REQUEST_TIMEOUT = 8  # Timeout interne en secondes (Render a ~10s)
-    CACHE_TTL = 600  # Cache plus long (10 min) pour réduire les appels
+    MAX_LIMIT = 20
+    MAX_CANDIDATES = 20
+    REQUEST_TIMEOUT = 8
+    CACHE_TTL = 600
 
 # ==================== CACHE AMÉLIORÉ ====================
 class SimpleCache:
     def __init__(self, ttl_seconds: int = Config.CACHE_TTL):
         self._cache = {}
         self._ttl = ttl_seconds
-        self._lock = threading.Lock()  # Thread-safe
+        self._lock = threading.Lock()
     
     def _make_key(self, *args, **kwargs) -> str:
         key_data = json.dumps({"args": args, "kwargs": kwargs}, sort_keys=True)
@@ -110,9 +110,8 @@ class ProfileService:
             return cached
         
         try:
-            # 🚀 OPTIMISATION : Requête plus légère
             response = self.supabase.table("profiles")\
-                .select("user_id, city, preferred_neighborhoods, budget_min, budget_max, preferred_property_types, preferred_listing_types")\
+                .select("user_id, city, neighborhood, budget_min, budget_max, property_type, listing_type")\
                 .eq("user_id", user_id)\
                 .limit(1)\
                 .execute()
@@ -194,7 +193,7 @@ class OptimizedScoringEngine:
         
         return {
             'score': min(score, 100),
-            'reasons': reasons[:2],  # Limite à 2 raisons
+            'reasons': reasons[:2],
             'is_fallback': is_fallback
         }
     
@@ -227,7 +226,7 @@ class RecommendationService:
             cached['from_cache'] = True
             return cached
         
-        # 2. Récupérer profil (avec timeout implicite)
+        # 2. Récupérer profil
         user_profile = None
         if req.user_id:
             user_profile = self.profile_service.get_profile(req.user_id)
@@ -248,10 +247,8 @@ class RecommendationService:
         else:
             result = self._search_with_preferences(prefs, req.limit)
             
-            # Si peu de résultats, fallback rapide
             if len(result['recommendations']) < 3:
                 fallback = self._get_similar_fallback(prefs, req.limit)
-                # Fusion sans doublons
                 seen = {r['id'] for r in result['recommendations']}
                 for r in fallback['recommendations']:
                     if r['id'] not in seen and len(result['recommendations']) < req.limit:
@@ -259,7 +256,6 @@ class RecommendationService:
                         seen.add(r['id'])
                 result['is_fallback'] = True
         
-        # 6. Mettre en cache et retourner
         recommendations_cache.set(result, *cache_key)
         logger.info(f"✅ Terminé en {time.time()-start_time:.2f}s - {len(result['recommendations'])} résultats")
         
@@ -273,6 +269,7 @@ class RecommendationService:
             req.budget_min,
             req.budget_max,
             req.property_type,
+            req.listing_type,
             min(req.limit, Config.MAX_LIMIT)
         )
     
@@ -282,7 +279,8 @@ class RecommendationService:
             prefs.get('neighborhood') or
             prefs.get('budget_min') is not None or
             prefs.get('budget_max') is not None or
-            prefs.get('property_type')
+            prefs.get('property_type') or
+            prefs.get('listing_type')
         )
     
     def _merge_preferences(self, req: RecommendationRequest, profile: Optional[Dict]) -> Dict:
@@ -291,14 +289,11 @@ class RecommendationService:
         # Profil
         if profile:
             merged['city'] = profile.get('city')
-            neighborhoods = profile.get('preferred_neighborhoods', [])
-            if neighborhoods:
-                merged['neighborhood'] = neighborhoods[0]
+            merged['neighborhood'] = profile.get('neighborhood')
             merged['budget_min'] = profile.get('budget_min')
             merged['budget_max'] = profile.get('budget_max')
-            types = profile.get('preferred_property_types', [])
-            if types:
-                merged['property_type'] = types[0]
+            merged['property_type'] = profile.get('property_type')
+            merged['listing_type'] = profile.get('listing_type')
         
         # Requête écrase profil
         if req.city: merged['city'] = req.city
@@ -306,6 +301,7 @@ class RecommendationService:
         if req.budget_min is not None: merged['budget_min'] = req.budget_min
         if req.budget_max is not None: merged['budget_max'] = req.budget_max
         if req.property_type: merged['property_type'] = req.property_type
+        if req.listing_type: merged['listing_type'] = req.listing_type
         
         return merged
     
@@ -313,13 +309,16 @@ class RecommendationService:
         """Recherche optimisée avec index"""
         try:
             query = self.supabase.table('properties')\
-                .select('id, title, price, city, neighborhood, property_type, created_at, view_count, images, bedrooms, bathrooms, surface')\
+                .select('id, title, price, city, neighborhood, property_type, listing_type, created_at, view_count, images, bedrooms, bathrooms, surface')\
                 .eq('is_published', True)\
                 .eq('is_available', True)
             
-            # 🚀 OPTIMISATION : Filtres exacts d'abord (utilisent les index)
+            # Filtres exacts d'abord (utilisent les index SQL)
             if prefs.get('property_type'):
                 query = query.eq('property_type', prefs['property_type'])
+            
+            if prefs.get('listing_type'):
+                query = query.eq('listing_type', prefs['listing_type'])
             
             if prefs.get('budget_max'):
                 query = query.lte('price', prefs['budget_max'])
@@ -327,7 +326,7 @@ class RecommendationService:
             if prefs.get('budget_min'):
                 query = query.gte('price', prefs['budget_min'])
             
-            # 🚀 OPTIMISATION : Ordre par date (indexé) puis limite stricte
+            # Ordre par date (indexé) puis limite stricte
             response = query.order('created_at', desc=True).limit(Config.MAX_CANDIDATES).execute()
             candidates = response.data or []
             
@@ -343,7 +342,7 @@ class RecommendationService:
             scored = []
             for prop in candidates:
                 scoring = self.scoring.score_property(prop, prefs)
-                if scoring['score'] > 15:  # Seuil plus bas
+                if scoring['score'] > 15:
                     scored.append({
                         **prop,
                         '_score': scoring['score'],
@@ -366,13 +365,19 @@ class RecommendationService:
         """Fallback léger"""
         try:
             query = self.supabase.table('properties')\
-                .select('id, title, price, city, neighborhood, property_type, created_at, view_count, images')\
+                .select('id, title, price, city, neighborhood, property_type, listing_type, created_at, view_count, images')\
                 .eq('is_published', True)\
                 .eq('is_available', True)
             
             # Budget élargi
             if prefs.get('budget_max'):
                 query = query.lte('price', prefs['budget_max'] * 1.3)
+            
+            if prefs.get('property_type'):
+                query = query.eq('property_type', prefs['property_type'])
+            
+            if prefs.get('listing_type'):
+                query = query.eq('listing_type', prefs['listing_type'])
             
             response = query.order('created_at', desc=True).limit(Config.MAX_CANDIDATES).execute()
             candidates = response.data or []
@@ -409,7 +414,7 @@ class RecommendationService:
         """Fallback générique ultra-rapide"""
         try:
             response = self.supabase.table('properties')\
-                .select('id, title, price, city, neighborhood, property_type, created_at, view_count, images')\
+                .select('id, title, price, city, neighborhood, property_type, listing_type, created_at, view_count, images')\
                 .eq('is_published', True)\
                 .eq('is_available', True)\
                 .order('created_at', desc=True)\
@@ -479,7 +484,7 @@ recommendation_service = None
 
 if supabase_url and supabase_key:
     try:
-        supabase = create_client(supabase_url, supabase_key)
+        supabase: Client = create_client(supabase_url, supabase_key)
         recommendation_service = RecommendationService(supabase)
         logger.info("✅ Services initialisés")
     except Exception as e:
@@ -506,7 +511,7 @@ def get_recommendations():
         body = request.get_json() or {}
         req = RecommendationRequest(**body)
         
-        # 🚀 Validation rapide
+        # Validation rapide
         if req.limit > Config.MAX_LIMIT:
             req.limit = Config.MAX_LIMIT
         
@@ -529,7 +534,6 @@ def get_recommendations():
         
     except Exception as e:
         logger.exception("❌ Erreur /recommendations")
-        # 🚀 Toujours retourner une réponse valide même en erreur
         return jsonify({
             'recommendations': [],
             'total': 0,
@@ -547,7 +551,7 @@ def track_feedback():
         body = request.get_json() or {}
         feedback = FeedbackRequest(**body)
         
-        # 🚀 Fire-and-forget : ne pas attendre la réponse
+        # Fire-and-forget : ne pas attendre la réponse
         def save_feedback():
             try:
                 supabase.table('feedback_events').insert({
