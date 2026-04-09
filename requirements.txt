@@ -1,7 +1,6 @@
 flask==3.0.3
 flask-cors==4.0.1
-supabase==2.5.1
+supabase==1.2.0
 pydantic==2.7.4
 gunicorn==22.0.0
-postgrest==0.16.3         # ✅ NOUVEAU - Dépendance Supabase implicite
-httpx==0.27.0             # ✅ NOUVEAU - Client HTTP moderne
+
